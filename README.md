@@ -30,24 +30,32 @@ near-real-time data (~1.3 s vs. 60 s), and far fewer failures (advertisements ca
 
 ## Quick Start
 
-On a Raspberry Pi (arm64):
+Published image (linux/arm64 only):
+`ghcr.io/rmarshall31/sensorpush-exporter:latest`
+
+On a Raspberry Pi:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-That pulls `ghcr.io/rmarshall31/sensorpush-exporter:latest` (linux/arm64). The
-package is private until you set it public in GitHub Packages after the first
-CI push. Until then, or to pick up local edits, build instead:
+Or:
+
+```bash
+docker pull ghcr.io/rmarshall31/sensorpush-exporter:latest
+```
+
+The exporter auto-discovers every SensorPush sensor in range. To pick up local
+edits instead of the published image:
 
 ```bash
 docker compose up -d --build
 ```
 
 Keep `--build` when you have changed `exporter.py`; Compose otherwise reuses
-the existing image. The exporter auto-discovers every SensorPush sensor in
-range.
+the existing image. A plain `docker build` on an amd64 machine will not run on
+the Pi.
 
 ### Running without Docker
 
