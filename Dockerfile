@@ -3,11 +3,7 @@ FROM python:3.14-slim-bookworm
 LABEL maintainer="SensorPush Exporter"
 LABEL description="Prometheus exporter for SensorPush BLE sensors"
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    bluez \
-    bluez-tools \
-    && rm -rf /var/lib/apt/lists/*
+# BLE uses the host bluetoothd over the mounted D-Bus socket, not in-image BlueZ.
 
 RUN useradd -m -u 1000 -s /bin/bash exporter
 
@@ -18,8 +14,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY exporter.py .
-
-RUN chmod +x exporter.py
 
 RUN chown -R exporter:exporter /app
 

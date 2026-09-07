@@ -17,7 +17,7 @@ from prometheus_client import Counter, Gauge, Info, start_http_server
 
 from bleak import BleakClient, BleakScanner
 
-SCANNING_MODE = os.getenv("SCANNING_MODE", "active").lower()  # "active" | "passive"
+SCANNING_MODE = os.getenv("SCANNING_MODE", "active").lower()
 BLE_ADAPTER = os.getenv("BLE_ADAPTER", "").strip()  # e.g. "hci0"; empty = default
 DEVICE_NAME_PREFIX = os.getenv("DEVICE_NAME_PREFIX", "SensorPush")
 
@@ -28,10 +28,10 @@ BATTERY_CONNECT_TIMEOUT = int(os.getenv("BATTERY_CONNECT_TIMEOUT", "30"))
 BATTERY_READ_RETRIES = int(os.getenv("BATTERY_READ_RETRIES", "2"))
 
 STALE_AFTER = int(os.getenv("STALE_AFTER", "900"))  # drop metrics if unseen this long; 0 disables
-MAINTENANCE_INTERVAL = int(os.getenv("MAINTENANCE_INTERVAL", "30"))  # main-loop tick
+MAINTENANCE_INTERVAL = int(os.getenv("MAINTENANCE_INTERVAL", "30"))
 
 EXPORTER_PORT = int(os.getenv("EXPORTER_PORT", "9108"))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Rejected up front: a zero tick spins the event loop, zero retries reports
 # failures without ever connecting, and a misspelled mode would silently scan
@@ -40,8 +40,24 @@ if MAINTENANCE_INTERVAL < 1:
     sys.exit(f"MAINTENANCE_INTERVAL must be >= 1, got {MAINTENANCE_INTERVAL}")
 if BATTERY_READ_RETRIES < 1:
     sys.exit(f"BATTERY_READ_RETRIES must be >= 1, got {BATTERY_READ_RETRIES}")
+if BATTERY_CONNECT_TIMEOUT < 1:
+    sys.exit(
+        f"BATTERY_CONNECT_TIMEOUT must be >= 1, got {BATTERY_CONNECT_TIMEOUT}"
+    )
 if SCANNING_MODE not in ("active", "passive"):
     sys.exit(f"SCANNING_MODE must be 'active' or 'passive', got {SCANNING_MODE!r}")
+if LOG_LEVEL not in {
+    "CRITICAL",
+    "FATAL",
+    "ERROR",
+    "WARNING",
+    "WARN",
+    "INFO",
+    "DEBUG",
+}:
+    sys.exit(
+        f"LOG_LEVEL must be a standard logging level, got {LOG_LEVEL!r}"
+    )
 
 VERSION = "3.0.0"
 
@@ -77,6 +93,10 @@ SENSORPUSH_PAYLOAD_LEN = {64: 5, 65: 3, 66: 2}
 PASSIVE_FLAGS = (b"\x06", b"\x1a", b"\x02", b"\x04", b"\x05")
 
 
+def _bluez_kwargs():
+    return {"adapter": BLE_ADAPTER} if BLE_ADAPTER else {}
+
+
 def _short_address(address: str) -> str:
     """Last two octets of a MAC, e.g. 'AA:BB:CC:DD:EE:FF' -> 'EEFF'."""
     return "".join(address.replace("-", ":").split(":")[-2:]).upper() or address
@@ -93,12 +113,11 @@ def _temperature_c_from_raw(num: int) -> float:
 
 def _find_latest_data(manufacturer_data: dict, is_ht1: bool):
     """Pick the manufacturer-data 'page' that carries current values (page 0)."""
-    for company_id in reversed(list(manufacturer_data)):
-        data = int(company_id).to_bytes(2, byteorder="little") + manufacturer_data[company_id]
-        if is_ht1:
-            return data
-        if (data[0] & 0x03) == 0:  # page_id 0 == current values
-            return data
+    for company_id in reversed(manufacturer_data):
+        cid = int(company_id)
+        if not is_ht1 and (cid & 0x03) != 0:  # page_id 0 == current values
+            continue
+        return cid.to_bytes(2, byteorder="little") + manufacturer_data[company_id]
     return None
 
 
@@ -141,16 +160,23 @@ def _decode_values(data: bytes, device_type_id: int) -> dict:
     return out
 
 
+def _is_ht1(name: str, service_uuids) -> bool:
+    return (
+        name == "s"
+        and service_uuids
+        and SENSORPUSH_SERVICE_UUID_HT1 in service_uuids
+    )
+
+
 def is_sensorpush(name: str, service_uuids) -> bool:
     """Conservatively decide whether an advertisement is from a SensorPush sensor."""
-    service_uuids = service_uuids or []
     if name and name.startswith(DEVICE_NAME_PREFIX):
         return True
+    if not service_uuids:
+        return False
     if SENSORPUSH_SERVICE_UUID_V2 in service_uuids:
         return True
-    if name == "s" and SENSORPUSH_SERVICE_UUID_HT1 in service_uuids:
-        return True
-    return False
+    return _is_ht1(name, service_uuids)
 
 
 def parse_advertisement(name: str, service_uuids, manufacturer_data: dict):
@@ -163,7 +189,7 @@ def parse_advertisement(name: str, service_uuids, manufacturer_data: dict):
     if not manufacturer_data:
         return None
 
-    is_ht1 = name == "s" and SENSORPUSH_SERVICE_UUID_HT1 in (service_uuids or [])
+    is_ht1 = _is_ht1(name, service_uuids)
     data = _find_latest_data(manufacturer_data, is_ht1)
     if data is None:
         return None
@@ -171,7 +197,7 @@ def parse_advertisement(name: str, service_uuids, manufacturer_data: dict):
     device_type_id = 1 if is_ht1 else 64 + (data[0] >> 2)
     model = SENSORPUSH_DEVICE_TYPES.get(device_type_id)
     if model is None:
-        return None  # unknown / non-current page; ignore
+        return None  # unknown device_type_id
 
     readings = _decode_values(data, device_type_id)
     if not readings:
@@ -180,7 +206,7 @@ def parse_advertisement(name: str, service_uuids, manufacturer_data: dict):
 
 
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    level=LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
@@ -235,7 +261,7 @@ device_info = Info(
     "sensorpush_device",
     "Device metadata; join readings on device_address. device_id is empty "
     "until the first successful battery read resolves it",
-    ["device_address"],
+    _LABELS,
 )
 exporter_info = Info("sensorpush_exporter", "Information about the exporter")
 exporter_info.info(
@@ -279,23 +305,28 @@ class SensorPushExporter:
     """Continuous BLE advertisement scanner + occasional battery reader."""
 
     def __init__(self):
-        self.devices = {}  # address -> device state dict
+        self.devices = {}
         self.scanner = None
         self._stop_event = asyncio.Event()
-
-    def _detection_callback(self, device, adv_data):
-        try:
-            self._process_advertisement(device, adv_data)
-        except Exception as exc:  # never let a bad packet kill the scanner
-            logger.debug("Failed to process advertisement from %s: %s", device.address, exc)
+        self._logged_empty = False
 
     def _process_advertisement(self, device, adv_data):
         name = adv_data.local_name or device.name
-        service_uuids = adv_data.service_uuids or []
+        service_uuids = adv_data.service_uuids
         if not is_sensorpush(name, service_uuids):
             return
 
-        parsed = parse_advertisement(name, service_uuids, adv_data.manufacturer_data)
+        try:
+            parsed = parse_advertisement(
+                name, service_uuids, adv_data.manufacturer_data
+            )
+        except (TypeError, ValueError, IndexError, OverflowError) as exc:
+            logger.debug(
+                "Failed to decode advertisement from %s: %s",
+                device.address,
+                exc,
+            )
+            return
         if parsed is None:
             return
         model, readings = parsed
@@ -342,7 +373,7 @@ class SensorPushExporter:
         name = dev["name"]
         client_kwargs = {"timeout": BATTERY_CONNECT_TIMEOUT}
         if BLE_ADAPTER:
-            client_kwargs["bluez"] = {"adapter": BLE_ADAPTER}
+            client_kwargs["bluez"] = _bluez_kwargs()
 
         last_error = None
         for attempt in range(1, BATTERY_READ_RETRIES + 1):
@@ -377,7 +408,7 @@ class SensorPushExporter:
                 if attempt < BATTERY_READ_RETRIES:
                     await asyncio.sleep(2)
 
-        logger.warning("[%s] battery read failed: %s", name, last_error or "connection failed")
+        logger.warning("[%s] battery read failed: %s", name, last_error)
         battery_read_errors_total.labels(address).inc()
         # Back off until the next interval so we don't hammer an unreachable sensor.
         dev["last_battery_read"] = time.time()
@@ -412,7 +443,7 @@ class SensorPushExporter:
             return
         for address in list(self.devices):
             dev = self.devices[address]
-            if dev["last_seen"] and (now - dev["last_seen"]) > STALE_AFTER:
+            if (now - dev["last_seen"]) > STALE_AFTER:
                 _remove_device(address)
                 del self.devices[address]
                 logger.info(
@@ -423,8 +454,7 @@ class SensorPushExporter:
                 )
 
     def _build_scanner(self):
-        bluez = {"adapter": BLE_ADAPTER} if BLE_ADAPTER else {}
-        mode = "active"
+        bluez = _bluez_kwargs()
 
         if SCANNING_MODE == "passive":
             # Imported lazily: only the passive path needs these, and bleak has
@@ -435,11 +465,10 @@ class SensorPushExporter:
             bluez["or_patterns"] = [
                 OrPattern(0, AdvertisementDataType.FLAGS, flags) for flags in PASSIVE_FLAGS
             ]
-            mode = "passive"
 
         return BleakScanner(
-            detection_callback=self._detection_callback,
-            scanning_mode=mode,
+            detection_callback=self._process_advertisement,
+            scanning_mode=SCANNING_MODE,
             bluez=bluez,
         )
 
@@ -452,7 +481,7 @@ class SensorPushExporter:
             try:
                 await self.scanner.stop()
             except Exception as exc:
-                logger.debug("Error stopping scanner: %s", exc)
+                logger.warning("Error stopping scanner: %s", exc)
             self.scanner = None
 
     async def _stop_requested(self, timeout) -> bool:
@@ -489,7 +518,13 @@ class SensorPushExporter:
             self._prune_stale(time.time())
 
             if not self.devices:
-                logger.warning("No SensorPush devices seen yet; still listening...")
+                if not self._logged_empty:
+                    logger.warning(
+                        "No SensorPush devices seen yet; still listening..."
+                    )
+                    self._logged_empty = True
+            else:
+                self._logged_empty = False
 
         await self._stop_scanner()
         logger.info("Scanner stopped")
