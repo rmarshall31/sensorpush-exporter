@@ -17,25 +17,37 @@ from prometheus_client import Counter, Gauge, Info, start_http_server
 
 from bleak import BleakClient, BleakScanner
 
+
+def _env_int(name, default):
+    raw = os.getenv(name, default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"{name} must be an integer, got {raw!r}")
+
+
 SCANNING_MODE = os.getenv("SCANNING_MODE", "active").lower()
 BLE_ADAPTER = os.getenv("BLE_ADAPTER", "").strip()  # e.g. "hci0"; empty = default
-DEVICE_NAME_PREFIX = os.getenv("DEVICE_NAME_PREFIX", "SensorPush")
+DEVICE_NAME_PREFIX = os.getenv("DEVICE_NAME_PREFIX", "SensorPush").strip()
 
 # Battery voltage is not broadcast and only updates on connect, so read it
 # rarely. BATTERY_READ_INTERVAL=0 disables connections entirely.
-BATTERY_READ_INTERVAL = int(os.getenv("BATTERY_READ_INTERVAL", "21600"))
-BATTERY_CONNECT_TIMEOUT = int(os.getenv("BATTERY_CONNECT_TIMEOUT", "30"))
-BATTERY_READ_RETRIES = int(os.getenv("BATTERY_READ_RETRIES", "2"))
+BATTERY_READ_INTERVAL = _env_int("BATTERY_READ_INTERVAL", "21600")
+BATTERY_CONNECT_TIMEOUT = _env_int("BATTERY_CONNECT_TIMEOUT", "30")
+BATTERY_READ_RETRIES = _env_int("BATTERY_READ_RETRIES", "2")
 
-STALE_AFTER = int(os.getenv("STALE_AFTER", "900"))  # drop metrics if unseen this long; 0 disables
-MAINTENANCE_INTERVAL = int(os.getenv("MAINTENANCE_INTERVAL", "30"))
+STALE_AFTER = _env_int("STALE_AFTER", "900")  # unseen this long; 0 disables
+MAINTENANCE_INTERVAL = _env_int("MAINTENANCE_INTERVAL", "30")
 
-EXPORTER_PORT = int(os.getenv("EXPORTER_PORT", "9108"))
+EXPORTER_PORT = _env_int("EXPORTER_PORT", "9108")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
+# BlueZ stop() should return promptly. Hanging here is the wedge we refuse.
+_SCANNER_STOP_TIMEOUT = 10
+
 # Rejected up front: a zero tick spins the event loop, zero retries reports
-# failures without ever connecting, and a misspelled mode would silently scan
-# actively.
+# failures without ever connecting, an empty name prefix matches every
+# advertiser, and a misspelled mode would silently scan actively.
 if MAINTENANCE_INTERVAL < 1:
     sys.exit(f"MAINTENANCE_INTERVAL must be >= 1, got {MAINTENANCE_INTERVAL}")
 if BATTERY_READ_RETRIES < 1:
@@ -44,6 +56,16 @@ if BATTERY_CONNECT_TIMEOUT < 1:
     sys.exit(
         f"BATTERY_CONNECT_TIMEOUT must be >= 1, got {BATTERY_CONNECT_TIMEOUT}"
     )
+if BATTERY_READ_INTERVAL < 0:
+    sys.exit(
+        f"BATTERY_READ_INTERVAL must be >= 0, got {BATTERY_READ_INTERVAL}"
+    )
+if STALE_AFTER < 0:
+    sys.exit(f"STALE_AFTER must be >= 0, got {STALE_AFTER}")
+if not 1 <= EXPORTER_PORT <= 65535:
+    sys.exit(f"EXPORTER_PORT must be 1-65535, got {EXPORTER_PORT}")
+if not DEVICE_NAME_PREFIX:
+    sys.exit("DEVICE_NAME_PREFIX must be non-empty")
 if SCANNING_MODE not in ("active", "passive"):
     sys.exit(f"SCANNING_MODE must be 'active' or 'passive', got {SCANNING_MODE!r}")
 if LOG_LEVEL not in {
@@ -59,7 +81,7 @@ if LOG_LEVEL not in {
         f"LOG_LEVEL must be a standard logging level, got {LOG_LEVEL!r}"
     )
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 # GATT characteristics: https://www.sensorpush.com/bluetooth-api
 DEVICE_ID_CHAR = "ef090001-11d6-42ba-93b8-9dd7ec090aa9"
@@ -353,17 +375,27 @@ class SensorPushExporter:
             self.devices[address] = dev
             logger.info("Discovered %s (%s) model=%s", dev["name"], address, model)
             self._publish_info(dev)
-        elif name and name != dev["name"]:
-            # The first advertisement can arrive without scan-response data, so
-            # the real name may only show up on a later packet.
-            dev["name"] = name
-            self._publish_info(dev)
+        else:
+            info_changed = False
+            if name and name != dev["name"]:
+                # First ads can lack scan-response data; the real name arrives later.
+                dev["name"] = name
+                info_changed = True
+            if model != dev["model"]:
+                dev["model"] = model
+                info_changed = True
+            if info_changed:
+                self._publish_info(dev)
         dev["last_seen"] = time.time()
 
         series = dev["series"]
         series["ads"].inc()
         for key, value in readings.items():
-            series[key].set(value)
+            child = series.get(key)
+            if child is None:
+                child = _READING_GAUGES[key].labels(address)
+                series[key] = child
+            child.set(value)
         if adv_data.rssi is not None:
             series["rssi"].set(adv_data.rssi)
         series["seen"].set(dev["last_seen"])
@@ -415,6 +447,8 @@ class SensorPushExporter:
             except Exception as exc:
                 last_error = exc
                 if attempt < BATTERY_READ_RETRIES:
+                    if self._stop_event.is_set():
+                        return
                     await asyncio.sleep(2)
 
         logger.warning("[%s] battery read failed: %s", name, last_error)
@@ -443,9 +477,11 @@ class SensorPushExporter:
         logger.info("Reading battery for %s (%d due)", dev["name"], len(due))
         await self._stop_scanner()
         try:
-            await self.read_battery(dev)
+            if not self._stop_event.is_set():
+                await self.read_battery(dev)
         finally:
-            await self._start_scanner()
+            if not self._stop_event.is_set():
+                await self._start_scanner()
 
     def _prune_stale(self, now):
         if STALE_AFTER <= 0:
@@ -486,12 +522,20 @@ class SensorPushExporter:
         await self.scanner.start()
 
     async def _stop_scanner(self):
-        if self.scanner is not None:
-            try:
-                await self.scanner.stop()
-            except Exception as exc:
-                logger.warning("Error stopping scanner: %s", exc)
-            self.scanner = None
+        scanner = self.scanner
+        if scanner is None:
+            return
+        self.scanner = None
+        try:
+            await asyncio.wait_for(scanner.stop(), _SCANNER_STOP_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(
+                "scanner.stop() timed out after %ds; exiting",
+                _SCANNER_STOP_TIMEOUT,
+            )
+            sys.exit(1)
+        except Exception as exc:
+            logger.warning("Error stopping scanner: %s", exc)
 
     async def _stop_requested(self, timeout) -> bool:
         """Wait up to `timeout` seconds; True if a shutdown was requested."""
@@ -545,7 +589,10 @@ class SensorPushExporter:
 
 def main():
     logger.info("Starting Prometheus metrics server on port %d", EXPORTER_PORT)
-    start_http_server(EXPORTER_PORT)
+    try:
+        start_http_server(EXPORTER_PORT)
+    except OSError as exc:
+        sys.exit(f"Failed to bind metrics port {EXPORTER_PORT}: {exc}")
     asyncio.run(SensorPushExporter().run())
 
 
