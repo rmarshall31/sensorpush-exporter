@@ -1,0 +1,22 @@
+services:
+  sensorpush-exporter:
+    build: .
+    container_name: sensorpush-exporter
+    restart: unless-stopped
+    # BLE access goes through the host's bluetoothd over D-Bus.
+    privileged: true
+    volumes:
+      - /var/run/dbus:/var/run/dbus:ro
+    ports:
+      - "9108:9108"
+    environment:
+      # "active" works everywhere out of the box; neither mode connects to read
+      # sensor values, only the periodic battery read below does.
+      # "passive" is lowest-power but needs BlueZ >= 5.55 with --experimental on the HOST.
+      SCANNING_MODE: "active"
+      # Battery voltage requires an occasional GATT connection (it is not broadcast).
+      # Default reads it every 6h. Set to 0 to never connect (fully passive).
+      BATTERY_READ_INTERVAL: "21600"
+      LOG_LEVEL: "INFO"
+      # Optional: pin a specific adapter, e.g. "hci0"
+      # BLE_ADAPTER: "hci0"
