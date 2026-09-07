@@ -207,4 +207,4 @@ Advertisement decoding adapted (MIT) from
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

@@ -87,9 +87,9 @@ VERSION = "3.0.1"
 DEVICE_ID_CHAR = "ef090001-11d6-42ba-93b8-9dd7ec090aa9"
 BATTERY_VOLTAGE_CHAR = "ef090007-11d6-42ba-93b8-9dd7ec090aa9"
 
-# Advertisement decoding is vendored from Bluetooth-Devices/sensorpush-ble
-# (originally Ernst79/bleparser), MIT licensed, to stay dependency-free and to
-# emit SI units matching our metric names.
+# Advertisement decoding is adapted from Bluetooth-Devices/sensorpush-ble
+# (originally Ernst79/bleparser); copyrights are in LICENSE. Kept here to stay
+# dependency-free and to emit SI units matching our metric names.
 SENSORPUSH_SERVICE_UUID_V2 = "ef090000-11d6-42ba-93b8-9dd7ec090ab0"
 SENSORPUSH_SERVICE_UUID_HT1 = "ef090000-11d6-42ba-93b8-9dd7ec090aa9"
 
