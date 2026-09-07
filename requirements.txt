@@ -1,2 +1,2 @@
-bleak
-prometheus-client
+bleak==3.0.2
+prometheus-client==0.26.0

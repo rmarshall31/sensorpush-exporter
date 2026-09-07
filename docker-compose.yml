@@ -1,5 +1,6 @@
 services:
   sensorpush-exporter:
+    image: ghcr.io/rmarshall31/sensorpush-exporter:latest
     build: .
     container_name: sensorpush-exporter
     restart: unless-stopped

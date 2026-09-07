@@ -49,6 +49,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Ruff
+.ruff_cache/
+
 # Docker
 docker-compose.override.yml
 

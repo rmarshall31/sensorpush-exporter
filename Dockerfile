@@ -1,7 +1,8 @@
 FROM python:3.14-slim-bookworm
 
-LABEL maintainer="SensorPush Exporter"
-LABEL description="Prometheus exporter for SensorPush BLE sensors"
+LABEL org.opencontainers.image.source="https://github.com/rmarshall31/sensorpush-exporter"
+LABEL org.opencontainers.image.description="Prometheus exporter for SensorPush BLE sensors"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # BLE uses the host bluetoothd over the mounted D-Bus socket, not in-image
 # BlueZ. Run as root: system-bus policy is by uid, and privileged does not

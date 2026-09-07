@@ -13,9 +13,8 @@ import signal
 import sys
 import time
 
-from prometheus_client import Counter, Gauge, Info, start_http_server
-
 from bleak import BleakClient, BleakScanner
+from prometheus_client import Counter, Gauge, Info, start_http_server
 
 
 def _env_int(name, default):
@@ -53,13 +52,9 @@ if MAINTENANCE_INTERVAL < 1:
 if BATTERY_READ_RETRIES < 1:
     sys.exit(f"BATTERY_READ_RETRIES must be >= 1, got {BATTERY_READ_RETRIES}")
 if BATTERY_CONNECT_TIMEOUT < 1:
-    sys.exit(
-        f"BATTERY_CONNECT_TIMEOUT must be >= 1, got {BATTERY_CONNECT_TIMEOUT}"
-    )
+    sys.exit(f"BATTERY_CONNECT_TIMEOUT must be >= 1, got {BATTERY_CONNECT_TIMEOUT}")
 if BATTERY_READ_INTERVAL < 0:
-    sys.exit(
-        f"BATTERY_READ_INTERVAL must be >= 0, got {BATTERY_READ_INTERVAL}"
-    )
+    sys.exit(f"BATTERY_READ_INTERVAL must be >= 0, got {BATTERY_READ_INTERVAL}")
 if STALE_AFTER < 0:
     sys.exit(f"STALE_AFTER must be >= 0, got {STALE_AFTER}")
 if not 1 <= EXPORTER_PORT <= 65535:
@@ -77,9 +72,7 @@ if LOG_LEVEL not in {
     "INFO",
     "DEBUG",
 }:
-    sys.exit(
-        f"LOG_LEVEL must be a standard logging level, got {LOG_LEVEL!r}"
-    )
+    sys.exit(f"LOG_LEVEL must be a standard logging level, got {LOG_LEVEL!r}")
 
 VERSION = "3.0.1"
 
@@ -125,12 +118,12 @@ def _short_address(address: str) -> str:
 
 
 def _relative_humidity_from_raw(num: int) -> float:
-    value = (-6.0) + (125.0 * (num / (2.0 ** 12.0)))
+    value = (-6.0) + (125.0 * (num / (2.0**12.0)))
     return round(min(max(value, 0.0), 100.0), 2)
 
 
 def _temperature_c_from_raw(num: int) -> float:
-    return round((-46.85) + (175.72 * (num / (2.0 ** 14.0))), 2)
+    return round((-46.85) + (175.72 * (num / (2.0**14.0))), 2)
 
 
 def _find_latest_data(manufacturer_data: dict, is_ht1: bool):
@@ -183,11 +176,7 @@ def _decode_values(data: bytes, device_type_id: int) -> dict:
 
 
 def _is_ht1(name: str, service_uuids) -> bool:
-    return (
-        name == "s"
-        and service_uuids
-        and SENSORPUSH_SERVICE_UUID_HT1 in service_uuids
-    )
+    return name == "s" and service_uuids and SENSORPUSH_SERVICE_UUID_HT1 in service_uuids
 
 
 def is_sensorpush(name: str, service_uuids) -> bool:
@@ -242,9 +231,7 @@ _LABELS = ["device_address"]
 temperature_gauge = Gauge(
     "sensorpush_temperature_celsius", "Temperature reading in Celsius", _LABELS
 )
-humidity_gauge = Gauge(
-    "sensorpush_humidity_percent", "Relative humidity percentage", _LABELS
-)
+humidity_gauge = Gauge("sensorpush_humidity_percent", "Relative humidity percentage", _LABELS)
 pressure_gauge = Gauge(
     "sensorpush_pressure_pascals", "Barometric pressure in Pascals (HTP.xw only)", _LABELS
 )
@@ -339,9 +326,7 @@ class SensorPushExporter:
             return
 
         try:
-            parsed = parse_advertisement(
-                name, service_uuids, adv_data.manufacturer_data
-            )
+            parsed = parse_advertisement(name, service_uuids, adv_data.manufacturer_data)
         except (TypeError, ValueError, IndexError, OverflowError) as exc:
             logger.debug(
                 "Failed to decode advertisement from %s: %s",
@@ -572,9 +557,7 @@ class SensorPushExporter:
 
             if not self.devices:
                 if not self._logged_empty:
-                    logger.warning(
-                        "No SensorPush devices seen yet; still listening..."
-                    )
+                    logger.warning("No SensorPush devices seen yet; still listening...")
                     self._logged_empty = True
             else:
                 self._logged_empty = False
