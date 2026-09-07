@@ -3,9 +3,9 @@ FROM python:3.14-slim-bookworm
 LABEL maintainer="SensorPush Exporter"
 LABEL description="Prometheus exporter for SensorPush BLE sensors"
 
-# BLE uses the host bluetoothd over the mounted D-Bus socket, not in-image BlueZ.
-
-RUN useradd -m -u 1000 -s /bin/bash exporter
+# BLE uses the host bluetoothd over the mounted D-Bus socket, not in-image
+# BlueZ. Run as root: system-bus policy is by uid, and privileged does not
+# change that.
 
 WORKDIR /app
 
@@ -14,10 +14,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY exporter.py .
-
-RUN chown -R exporter:exporter /app
-
-USER exporter
 
 # EXPOSE cannot read runtime env; override both together if you change the port.
 ENV EXPORTER_PORT=9108

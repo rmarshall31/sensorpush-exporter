@@ -334,6 +334,13 @@ class SensorPushExporter:
         address = device.address
         dev = self.devices.get(address)
         if dev is None:
+            series = {
+                "ads": advertisements_received_total.labels(address),
+                "rssi": rssi_gauge.labels(address),
+                "seen": last_update_timestamp.labels(address),
+            }
+            for key in readings:
+                series[key] = _READING_GAUGES[key].labels(address)
             dev = {
                 "name": name or f"{model} {_short_address(address)}",
                 "address": address,
@@ -341,6 +348,7 @@ class SensorPushExporter:
                 "device_id": "",
                 "last_seen": 0.0,
                 "last_battery_read": 0.0,
+                "series": series,
             }
             self.devices[address] = dev
             logger.info("Discovered %s (%s) model=%s", dev["name"], address, model)
@@ -352,12 +360,13 @@ class SensorPushExporter:
             self._publish_info(dev)
         dev["last_seen"] = time.time()
 
-        advertisements_received_total.labels(address).inc()
+        series = dev["series"]
+        series["ads"].inc()
         for key, value in readings.items():
-            _READING_GAUGES[key].labels(address).set(value)
+            series[key].set(value)
         if adv_data.rssi is not None:
-            rssi_gauge.labels(address).set(adv_data.rssi)
-        last_update_timestamp.labels(address).set(dev["last_seen"])
+            series["rssi"].set(adv_data.rssi)
+        series["seen"].set(dev["last_seen"])
 
     def _publish_info(self, dev):
         device_info.labels(dev["address"]).info(

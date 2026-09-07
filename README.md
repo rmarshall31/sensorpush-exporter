@@ -168,6 +168,8 @@ scrape_configs:
 **Bluetooth adapter not accessible:**
 
 - Ensure `/var/run/dbus` is mounted (see `docker-compose.yml`).
+- The container must run as root. Host `bluetoothd` D-Bus policy is by uid;
+  `privileged: true` is not a substitute.
 - Check logs: `docker compose logs -f`.
 
 **Battery voltage never appears:**

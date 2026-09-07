@@ -4,6 +4,7 @@ services:
     container_name: sensorpush-exporter
     restart: unless-stopped
     # BLE access goes through the host's bluetoothd over D-Bus.
+    # Root is required: D-Bus policy is by uid; privileged is not enough.
     privileged: true
     volumes:
       - /var/run/dbus:/var/run/dbus:ro
