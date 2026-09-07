@@ -2,7 +2,7 @@
 
 Lightweight, **battery-friendly** Prometheus exporter for SensorPush 2nd-generation
 BLE sensors (HT.w, HTP.xw, TC.x). Optimized for long-running operation on a
-Raspberry Pi.
+Raspberry Pi. Unofficial; not affiliated with SensorPush.
 
 ## How it works (and why it's easy on the battery)
 
