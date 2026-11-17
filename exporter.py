@@ -74,7 +74,7 @@ if LOG_LEVEL not in {
 }:
     sys.exit(f"LOG_LEVEL must be a standard logging level, got {LOG_LEVEL!r}")
 
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 
 # GATT characteristics: https://www.sensorpush.com/bluetooth-api
 DEVICE_ID_CHAR = "ef090001-11d6-42ba-93b8-9dd7ec090aa9"
@@ -136,6 +136,23 @@ def _find_latest_data(manufacturer_data: dict, is_ht1: bool):
     return None
 
 
+def _changed_manufacturer_data(current: dict, previous: dict | None) -> dict:
+    """Entries new or changed since `previous`, after sensorpush-ble.
+
+    On Linux bleak hands over BlueZ's cached ManufacturerData, which keeps one
+    entry per company id for as long as bluetoothd knows the device. SensorPush
+    packs reading bits into the company id, so the cache fills, and a new
+    reading then overwrites a key in place without moving it in dict order.
+    Only the diff says which entry is new. A one-entry dict is always current:
+    CoreBluetooth reports just the latest packet, and BlueZ starts that way.
+    """
+    if len(current) == 1:
+        return current
+    if previous is None:
+        return {}
+    return {k: v for k, v in current.items() if previous.get(k) != v}
+
+
 def _decode_ht1(data: bytes) -> dict:
     if len(data) < 4:
         return {}
@@ -190,12 +207,16 @@ def is_sensorpush(name: str, service_uuids) -> bool:
     return _is_ht1(name, service_uuids)
 
 
-def parse_advertisement(name: str, service_uuids, manufacturer_data: dict):
+def parse_advertisement(
+    name: str, service_uuids, manufacturer_data: dict, previous: dict | None = None
+):
     """
     Decode a SensorPush advertisement.
 
     Returns (model, readings) or None. readings keys are a subset of
-    {"temperature_c", "humidity_pct", "pressure_pa"}.
+    {"temperature_c", "humidity_pct", "pressure_pa"}, and readings is empty
+    unless the advertisement brought a new reading since `previous`, the
+    device's last manufacturer data.
     """
     if not manufacturer_data:
         return None
@@ -210,10 +231,14 @@ def parse_advertisement(name: str, service_uuids, manufacturer_data: dict):
     if model is None:
         return None  # unknown device_type_id
 
-    readings = _decode_values(data, device_type_id)
-    if not readings:
-        return None
-    return model, readings
+    changed = _changed_manufacturer_data(manufacturer_data, previous)
+    # Several changes at once means updates were coalesced and their order lost.
+    if len(changed) != 1:
+        return model, {}
+    data = _find_latest_data(changed, is_ht1)
+    if data is None:
+        return model, {}
+    return model, _decode_values(data, device_type_id)
 
 
 logging.basicConfig(
@@ -248,7 +273,7 @@ battery_temperature_gauge = Gauge(
 rssi_gauge = Gauge("sensorpush_rssi_dbm", "Signal strength in dBm", _LABELS)
 last_update_timestamp = Gauge(
     "sensorpush_last_update_timestamp",
-    "Unix timestamp of the last advertisement decoded (use to detect stale data)",
+    "Unix timestamp of the last new reading decoded (use to detect stale data)",
     _LABELS,
 )
 battery_last_read_timestamp = Gauge(
@@ -258,7 +283,7 @@ battery_last_read_timestamp = Gauge(
 )
 advertisements_received_total = Counter(
     "sensorpush_advertisements_received_total",
-    "Total SensorPush advertisements successfully decoded",
+    "Total SensorPush advertisements received, with or without a new reading",
     _LABELS,
 )
 battery_read_errors_total = Counter(
@@ -325,12 +350,21 @@ class SensorPushExporter:
         if not is_sensorpush(name, service_uuids):
             return
 
+        address = device.address
+        dev = self.devices.get(address)
+        # bleak builds a fresh dict per callback, so keeping it needs no copy.
+        manufacturer_data = adv_data.manufacturer_data
         try:
-            parsed = parse_advertisement(name, service_uuids, adv_data.manufacturer_data)
+            parsed = parse_advertisement(
+                name,
+                service_uuids,
+                manufacturer_data,
+                dev["manufacturer_data"] if dev else None,
+            )
         except (TypeError, ValueError, IndexError, OverflowError) as exc:
             logger.debug(
                 "Failed to decode advertisement from %s: %s",
-                device.address,
+                address,
                 exc,
             )
             return
@@ -338,13 +372,10 @@ class SensorPushExporter:
             return
         model, readings = parsed
 
-        address = device.address
-        dev = self.devices.get(address)
         if dev is None:
             series = {
                 "ads": advertisements_received_total.labels(address),
                 "rssi": rssi_gauge.labels(address),
-                "seen": last_update_timestamp.labels(address),
             }
             for key in readings:
                 series[key] = _READING_GAUGES[key].labels(address)
@@ -355,6 +386,7 @@ class SensorPushExporter:
                 "device_id": "",
                 "last_seen": 0.0,
                 "last_battery_read": 0.0,
+                "manufacturer_data": None,
                 "series": series,
             }
             self.devices[address] = dev
@@ -371,19 +403,28 @@ class SensorPushExporter:
                 info_changed = True
             if info_changed:
                 self._publish_info(dev)
+        # last_seen tracks presence for pruning, so a unit that keeps
+        # advertising without new readings stays exported and shows as stale.
         dev["last_seen"] = time.time()
+        dev["manufacturer_data"] = manufacturer_data
 
         series = dev["series"]
         series["ads"].inc()
+        if adv_data.rssi is not None:
+            series["rssi"].set(adv_data.rssi)
+        if not readings:
+            return
         for key, value in readings.items():
             child = series.get(key)
             if child is None:
                 child = _READING_GAUGES[key].labels(address)
                 series[key] = child
             child.set(value)
-        if adv_data.rssi is not None:
-            series["rssi"].set(adv_data.rssi)
-        series["seen"].set(dev["last_seen"])
+        # Created on the first reading: a 0 would read as decades stale.
+        seen = series.get("seen")
+        if seen is None:
+            seen = series["seen"] = last_update_timestamp.labels(address)
+        seen.set(dev["last_seen"])
 
     def _publish_info(self, dev):
         device_info.labels(dev["address"]).info(
