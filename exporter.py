@@ -447,15 +447,18 @@ class SensorPushExporter:
             try:
                 async with BleakClient(address, **client_kwargs) as client:
                     raw = await client.read_gatt_char(BATTERY_VOLTAGE_CHAR)
-                    try:
-                        id_raw = await client.read_gatt_char(DEVICE_ID_CHAR)
-                        new_id = str(int.from_bytes(id_raw, byteorder="little", signed=False))
-                        if new_id != dev["device_id"]:
-                            dev["device_id"] = new_id
-                            self._publish_info(dev)
-                            logger.info("[%s] resolved device_id: %s", name, new_id)
-                    except Exception as exc:
-                        logger.debug("[%s] device id read failed: %s", name, exc)
+                    # Device id is stable; rereading it on later connects is
+                    # extra airtime after the radio is already in high power.
+                    if not dev["device_id"]:
+                        try:
+                            id_raw = await client.read_gatt_char(DEVICE_ID_CHAR)
+                            new_id = str(int.from_bytes(id_raw, byteorder="little", signed=False))
+                            if new_id != dev["device_id"]:
+                                dev["device_id"] = new_id
+                                self._publish_info(dev)
+                                logger.info("[%s] resolved device_id: %s", name, new_id)
+                        except Exception as exc:
+                            logger.debug("[%s] device id read failed: %s", name, exc)
 
                 if len(raw) >= 2:
                     voltage_mv = int.from_bytes(raw[0:2], byteorder="little", signed=False)
@@ -483,9 +486,9 @@ class SensorPushExporter:
         dev["last_battery_read"] = time.time()
 
     async def battery_cycle(self):
-        """Read the battery of the single most overdue device, scanner paused."""
+        """Read the single most overdue device. True if the scanner was paused."""
         if BATTERY_READ_INTERVAL <= 0:
-            return
+            return False
         now = time.time()
         due = [
             dev
@@ -493,7 +496,7 @@ class SensorPushExporter:
             if now - dev["last_battery_read"] >= BATTERY_READ_INTERVAL
         ]
         if not due:
-            return
+            return False
 
         # One device per cycle. Scanning is impossible while connected, so a
         # whole batch of unreachable sensors would blank every reading for
@@ -508,6 +511,7 @@ class SensorPushExporter:
         finally:
             if not self._stop_event.is_set():
                 await self._start_scanner()
+        return True
 
     def _prune_stale(self, now):
         if STALE_AFTER <= 0:
@@ -561,7 +565,8 @@ class SensorPushExporter:
             )
             sys.exit(1)
         except Exception as exc:
-            logger.warning("Error stopping scanner: %s", exc)
+            logger.error("scanner.stop() failed: %s; exiting", exc)
+            sys.exit(1)
 
     async def _stop_requested(self, timeout) -> bool:
         """Wait up to `timeout` seconds; True if a shutdown was requested."""
@@ -593,8 +598,10 @@ class SensorPushExporter:
         logger.info("Listening for SensorPush advertisements (no per-poll connections)")
 
         while not await self._stop_requested(MAINTENANCE_INTERVAL):
-            await self.battery_cycle()
-            self._prune_stale(time.time())
+            # A GATT tick stops scanning, so last_seen does not advance.
+            # Pruning then would drop the device and reconnect on rediscovery.
+            if not await self.battery_cycle():
+                self._prune_stale(time.time())
 
             if not self.devices:
                 if not self._logged_empty:
