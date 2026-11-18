@@ -19,6 +19,11 @@ jobs:
       - uses: astral-sh/ruff-action@v3
         with:
           args: format --check .
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14" # the Dockerfile base image
+      - run: pip install -r requirements.txt
+      - run: python -m unittest
 
   build:
     needs: lint
